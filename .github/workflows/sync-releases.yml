@@ -2,47 +2,61 @@ name: Sync Upstream Releases
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Runs automatically once every day
-  workflow_dispatch: # Allows you to manually trigger it with a button click
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Double-checks that your token has write access
     steps:
       - name: Sync Releases from Original Repo
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # FIXME: Change these two lines to match the original project you copied!
+          # ⚠️ REPLACE THESE TWO VALUES EXPLICITLY:
           UPSTREAM_OWNER="iptvorganization"
           UPSTREAM_REPO="TV-AutoBuild"
           
-          echo "Fetching releases from $UPSTREAM_OWNER/$UPSTREAM_REPO..."
+          echo "Checking upstream target: $UPSTREAM_OWNER/$UPSTREAM_REPO..."
           
-          # Fetch the latest release tag from the upstream repo using GitHub CLI
-          LATEST_TAG=$(gh api repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/releases/latest --jq '.tag_name')
+          # Safely fetch the latest release tag
+          LATEST_TAG=$(gh api repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/releases/latest --jq '.tag_name' 2>/dev/null || echo "none")
           
-          # Check if this release already exists in your fork
+          if [ "$LATEST_TAG" = "none" ] || [ -z "$LATEST_TAG" ]; then
+            echo "❌ No official releases found on the upstream repository or a typo exists in the names."
+            exit 0
+          fi
+          
+          echo "Latest upstream release tag discovered: $LATEST_TAG"
+          
+          # Check if your fork already has it
           MY_RELEASE=$(gh api repos/${{ github.repository }}/releases/tags/$LATEST_TAG --fail 2>/dev/null || echo "not_found")
           
           if [ "$MY_RELEASE" = "not_found" ]; then
-            echo "New release found: $LATEST_TAG. Syncing..."
+            echo "New release found: $LATEST_TAG. Beginning sync process..."
             
-            # Download release information
+            # Download details
             gh api repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/releases/latest > release_info.json
             TITLE=$(cat release_info.json | jq -r '.name')
             BODY=$(cat release_info.json | jq -r '.body')
             
-            # Create the matching release inside your fork
-            gh release create "$LATEST_TAG" --title "$TITLE" --notes "$BODY"
+            # Generate release locally inside your fork repository
+            gh release create "$LATEST_TAG" --repo "${{ github.repository }}" --title "$TITLE" --notes "$BODY"
             
-            # Download assets and re-upload them to your fork
-            gh release download "$LATEST_TAG" -R "$UPSTREAM_OWNER/$UPSTREAM_REPO" --dir ./downloads
-            for file in ./downloads/*; do
-              if [ -f "$file" ]; then
-                gh release upload "$LATEST_TAG" "$file"
-              fi
-            done
+            # Fetch, bundle and forward assets cleanly
+            mkdir -p ./downloads
+            if gh release download "$LATEST_TAG" -R "$UPSTREAM_OWNER/$UPSTREAM_REPO" --dir ./downloads 2>/dev/null; then
+              for file in ./downloads/*; do
+                if [ -f "$file" ]; then
+                  echo "Uploading asset: $file"
+                  gh release upload "$LATEST_TAG" "$file" --repo "${{ github.repository }}" --clobber
+                fi
+              done
+            else
+              echo "No attached binary assets found for this release; synced source history only."
+            fi
           else
-            echo "Your fork is already up to date with the latest release ($LATEST_TAG)."
+            echo "✅ Success! Your fork is already aligned with the latest release ($LATEST_TAG)."
           fi
